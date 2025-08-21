@@ -10,8 +10,8 @@ def home():
     return "MF_BOT is alive", 200
 
 def _run():
-    # Render ส่งพอร์ตผ่าน ENV ชื่อ PORT; ตั้งค่า default เผื่อรันท้องถิ่น
-    port = int(os.environ.get("PORT", 10000))
+    # Render ใส่ PORT มาให้ใน ENV; ใช้ค่านี้เสมอ
+    port = int(os.environ.get("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
 
 def keep_alive():

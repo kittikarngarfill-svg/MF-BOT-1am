@@ -12,6 +12,9 @@ import aiohttp
 import logging
 import json
 from keep_alive import keep_alive
+import signal
+import traceback
+import sys
 
 logging.basicConfig(level=logging.INFO)              # เปลี่ยนเป็น DEBUG ได้ถ้าต้องการ
 logger = logging.getLogger("mf_bot")
@@ -45,6 +48,24 @@ ACCENT_COLOR = nextcord.Color.from_rgb(246, 189, 22)  # โทนทอง 1AM
 FOOTER_ICON = "https://i.ibb.co/3kZ0xFq/mf-logo.png"
 FOOTER_TEXT = "MF_BOT • ระบบลงทะเบียน"
 # ============================
+
+# --- ช่วย log เมื่อโปรเซสถูกปิดโดยแพลตฟอร์ม ---
+def _graceful_shutdown(signum, frame):
+    print(f"[SIGNAL] Received {signum} -> shutting down gracefully", flush=True)
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(bot.close())
+    except Exception as e:
+        print(f"[SIGNAL] close failed: {e}", flush=True)
+
+for s in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(s, _graceful_shutdown)
+
+# --- Global error hook ของ nextcord ---
+@bot.event
+async def on_error(event_method, *args, **kwargs):
+    print(f"[on_error] in {event_method}", flush=True)
+    traceback.print_exc()
 
 def _load_raid_db():
     try:
@@ -756,9 +777,26 @@ async def on_ready():
                 message_id=msg_id
             ))
 
-if __name__ == "__main__":
-    keep_alive()
+try:
+    from keep_alive import keep_alive
+    HAS_KEEP_ALIVE = True
+except Exception:
+    HAS_KEEP_ALIVE = False
+    def keep_alive():
+        # ไม่มีเว็บ keep-alive ก็ไม่ทำอะไร
+        pass
     
-bot.run(TOKEN)
+if __name__ == "__main__":
+    if HAS_KEEP_ALIVE:
+        keep_alive()
+
+    try:
+        print("[BOOT] starting bot.run()", flush=True)
+        bot.run(TOKEN)
+        print("[BOOT] bot.run() returned (client closed).", flush=True)
+    except Exception as e:
+        print("[FATAL] bot.run crashed:", e, flush=True)
+        traceback.print_exc()
+        sys.exit(1)
 
 #รันโดย python MF_BOT_1am.py
