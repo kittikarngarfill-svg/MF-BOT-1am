@@ -24,6 +24,12 @@ import nextcord as discord
 from nextcord.ext import commands, tasks
 from nextcord.utils import get
 
+intents = discord.Intents.all()
+intents.members = True
+intents.message_content = True
+intents.voice_states = True   # <- เพิ่ม
+bot = commands.Bot(command_prefix="!", intents=intents)
+
 # ---------------- keep_alive (optional) ----------------
 try:
     from keep_alive import keep_alive
@@ -427,11 +433,16 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 if __name__ == "__main__":
     if HAS_KEEP_ALIVE:
         keep_alive()
-    try:
-        print("[BOOT] starting bot.run()", flush=True)
-        bot.run(TOKEN)
-        print("[BOOT] bot.run() returned", flush=True)
-    except Exception as e:
-        print("[FATAL] bot.run crashed:", e, flush=True)
-        traceback.print_exc()
-        sys.exit(1)
+
+    import time
+    # ถ้าคลาส client ปิดตัว (เช่น voice เกิด error ภายใน lib) จะวนรันใหม่
+    while True:
+        try:
+            print("[BOOT] starting bot.run()", flush=True)
+            bot.run(TOKEN)
+            print("[BOOT] bot.run() returned (client closed). Will restart in 5s.", flush=True)
+        except Exception as e:
+            import traceback
+            print("[FATAL] bot.run crashed:", e, flush=True)
+            traceback.print_exc()
+        time.sleep(5)
