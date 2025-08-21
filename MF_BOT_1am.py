@@ -11,6 +11,8 @@ from datetime import datetime, timedelta, timezone
 import aiohttp
 import logging
 import json
+from keep_alive import keep_alive
+
 logging.basicConfig(level=logging.INFO)              # เปลี่ยนเป็น DEBUG ได้ถ้าต้องการ
 logger = logging.getLogger("mf_bot")
 
@@ -737,6 +739,10 @@ async def on_ready():
                 channel_id=CheckRaid_Channel_ID,
                 message_id=msg_id
             ))
+
+if __name__ == "__main__":
+    keep_alive()
+    
 bot.run(TOKEN)
 
 #รันโดย python MF_BOT_1am.py
