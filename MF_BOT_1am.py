@@ -20,15 +20,11 @@ import datetime
 import aiohttp
 
 from dotenv import load_dotenv
-import nextcord as discord
-from nextcord.ext import commands, tasks
-from nextcord.utils import get
 
-intents = discord.Intents.all()
-intents.members = True
-intents.message_content = True
-intents.voice_states = True   # <- เพิ่ม
-bot = commands.Bot(command_prefix="!", intents=intents)
+# ใช้ discord.py (official)
+import discord
+from discord.ext import commands, tasks
+from discord.utils import get
 
 # ---------------- keep_alive (optional) ----------------
 try:
@@ -64,7 +60,7 @@ VC_CHANNEL_ID = require_env("VC_CHANNEL_ID", int)
 TEXT_CHANNEL_ID = require_env("TEXT_CHANNEL_ID", int)
 STATUS_UPDATE_INTERVAL = int(os.getenv("STATUS_UPDATE_INTERVAL", "30"))
 
-# ฟีเจอร์ปุ่ม/เช็คชื่อใช้ค่าเหล่านี้ (ตั้งใน .env จะดีกว่า)
+# ค่าเสริม (แก้หรือใส่ใน .env ได้)
 ROLE_ID = int(os.getenv("ROLE_ID", "1372176652989239336"))
 BOT_CHANNEL_ID = int(os.getenv("BOT_CHANNEL_ID", "1403316515956064327"))
 CHECKRAID_CHANNEL_ID = int(os.getenv("CHECKRAID_CHANNEL_ID", "1385971877079679006"))
@@ -124,6 +120,7 @@ def non_bot_count(ch: discord.VoiceChannel) -> int:
     return sum(1 for m in ch.members if not m.bot)
 
 def tts_url(text: str) -> str:
+    # Google TTS แบบง่าย (สำหรับทดสอบ)
     return f"https://translate.google.com/translate_tts?ie=UTF-8&q={text}&tl=th&client=tw-ob"
 
 async def play_tts(vc: discord.VoiceClient | None, text: str):
@@ -188,13 +185,13 @@ class RegisterModal(discord.ui.Modal, title="ลงทะเบียนสม�
         member = interaction.user
         new_nick = f"{self.nickname.value} ({self.age.value})"
 
-        # ตรวจสิทธิ์เปลี่ยนชื่อ + ลำดับ role
         try:
-            # บอทต้องสูงกว่า target ใน role hierarchy
-            me = interaction.guild.me
-            can_manage = interaction.guild.me.guild_permissions.manage_nicknames
-            bot_top_pos = me.top_role.position if me else -1
+            # ตรวจสิทธิ์เปลี่ยนชื่อ + ลำดับ role
+            me = interaction.guild.get_member(bot.user.id) or interaction.guild.me
+            can_manage = me.guild_permissions.manage_nicknames if me else False
+            bot_top_pos = me.top_role.position if me and me.top_role else -1
             target_top_pos = member.top_role.position if member.top_role else -1
+
             if not can_manage or bot_top_pos <= target_top_pos or member == interaction.guild.owner:
                 await interaction.response.send_message(
                     f"✅ ได้รับข้อมูลแล้ว\nชื่อเล่น: {self.nickname.value}\nอายุ: {self.age.value}\n"
@@ -202,7 +199,7 @@ class RegisterModal(discord.ui.Modal, title="ลงทะเบียนสม�
                     f"กรุณาให้แอดมินย้าย role ของบอทไว้สูงกว่า หรือให้สิทธิ์ Manage Nicknames",
                     ephemeral=True
                 )
-                # แม้เปลี่ยนชื่อไม่ได้ แต่ถือว่า "ลงทะเบียนแล้ว" เพื่อกัน spam
+                # กันลงทะเบียนซ้ำ
                 registered_users.add(user_id)
                 _save_registered(registered_users)
                 return
@@ -225,7 +222,6 @@ class RegisterView(discord.ui.View):
 
     @discord.ui.button(label="ลงทะเบียน", style=discord.ButtonStyle.success)
     async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # กันลงทะเบียนซ้ำ
         if interaction.user.id in registered_users:
             await interaction.response.send_message("❌ คุณลงทะเบียนไปแล้ว ไม่สามารถลงทะเบียนซ้ำได้ครับ", ephemeral=True)
             return
@@ -252,7 +248,7 @@ class RoleMessageView(discord.ui.View):
                 if not member.bot:
                     await member.send(message_text)
                     sent += 1
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.5)  # กัน rate limit
             except:
                 pass
         await interaction.response.send_message(f"📨 ส่งข้อความให้ {sent} คนแล้ว", ephemeral=True)
@@ -291,7 +287,6 @@ async def cmd_checkin(ctx: commands.Context):
 
 @bot.command(name="ลงทะเบียน")
 async def cmd_register(ctx: commands.Context):
-    # ส่งปุ่มลงทะเบียนในห้องไหนก็ได้
     embed = discord.Embed(
         title="📋 ลงทะเบียนสมาชิก",
         description="กดปุ่มด้านล่างเพื่อเปิดฟอร์มกรอกชื่อเล่นและอายุ\n(ลงทะเบียนได้ครั้งเดียว)",
@@ -416,16 +411,13 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
         last_voice_states[member.id] = after
 
     except AttributeError as e:
-        if "close" in str(e) and "_MissingSentinel" in str(e):
-            print("[WARN] Ignored known nextcord voice close bug; soft-reset", flush=True)
-            try:
-                if voice_client and voice_client.is_connected():
-                    await voice_client.disconnect(force=True)
-            except Exception:
-                pass
-            voice_client = None
-        else:
-            print(f"[ERROR] on_voice_state_update: {e}", flush=True)
+        print(f"[ERROR] on_voice_state_update(AttributeError): {e}", flush=True)
+        try:
+            if voice_client and voice_client.is_connected():
+                await voice_client.disconnect(force=True)
+        except Exception:
+            pass
+        voice_client = None
     except Exception as e:
         print(f"[ERROR] on_voice_state_update: {e}", flush=True)
 
@@ -433,16 +425,11 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 if __name__ == "__main__":
     if HAS_KEEP_ALIVE:
         keep_alive()
-
-    import time
-    # ถ้าคลาส client ปิดตัว (เช่น voice เกิด error ภายใน lib) จะวนรันใหม่
-    while True:
-        try:
-            print("[BOOT] starting bot.run()", flush=True)
-            bot.run(TOKEN)
-            print("[BOOT] bot.run() returned (client closed). Will restart in 5s.", flush=True)
-        except Exception as e:
-            import traceback
-            print("[FATAL] bot.run crashed:", e, flush=True)
-            traceback.print_exc()
-        time.sleep(5)
+    try:
+        print("[BOOT] starting bot.run()", flush=True)
+        bot.run(TOKEN)
+        print("[BOOT] bot.run() returned (client closed).", flush=True)
+    except Exception as e:
+        print("[FATAL] bot.run crashed:", e, flush=True)
+        traceback.print_exc()
+        sys.exit(1)
