@@ -33,6 +33,9 @@ joined_users = set()
 RAID_DB_PATH = "raid_check.json"
 last_voice_states = {}
 
+voice_connect_lock = asyncio.Lock()
+voice_client = None
+
 ROLE_ID = 1372176652989239336  # ใส่ ID ของ Role ที่ต้องการส่งให้
 BOT_CHANNEL_ID = 1403316515956064327
 CheckRaid_Channel_ID = 1385971877079679006
@@ -238,43 +241,56 @@ async def update_status():
 # -----------------------------
 # Voice State Update
 # -----------------------------
+
+def non_bot_count(ch: nextcord.VoiceChannel) -> int:
+    return sum(1 for m in ch.members if not m.bot)
+
 @bot.event
 async def on_voice_state_update(member, before, after):
+    global voice_client
+
     if member.bot:
         return
 
     voice_channel = bot.get_channel(VC_CHANNEL_ID)
+    if not voice_channel:
+        return
 
     try:
-        vc = get(bot.voice_clients, guild=member.guild)
-        if not vc and (after.channel == voice_channel or before.channel == voice_channel):
-            vc = await voice_channel.connect()
+        # อัปเดตตัวชี้ voice_client ปัจจุบัน
+        vc_now = nextcord.utils.get(bot.voice_clients, guild=member.guild)
+        if vc_now is not None:
+            voice_client = vc_now
 
-        if after.channel == voice_channel and before.channel != voice_channel:
-            if member.id not in joined_users:
-                joined_users.add(member.id)
-                await play_tts(vc, f"{member.display_name} เข้ามาแล้วจ้า")
+        # 1) ถ้ายังไม่มีคน (non-bot) อยู่ในห้องนี้เลย -> ถ้าบอทยังค้างอยู่ ให้ถอด
+        if non_bot_count(voice_channel) == 0:
+            if voice_client and voice_client.is_connected():
+                # หน่วงนิดกันแกว่ง
+                await asyncio.sleep(5)
+                # ตรวจอีกครั้งก่อนถอด
+                if non_bot_count(voice_channel) == 0:
+                    await voice_client.disconnect(force=True)
+                    voice_client = None
+                    print("Bot ออกจากห้องเพราะไม่มีใครอยู่")
+            return
 
-        elif before.channel == voice_channel and after.channel != voice_channel:
-            if member.id in joined_users:
-                joined_users.remove(member.id)
-                await play_tts(vc, f"{member.display_name} ออกไปแล้วจ้า")
+        # 2) ถ้ามีคนอยู่แล้ว แต่ยังไม่ได้ต่อ -> ต่อ (โดยล็อกกัน connect ซ้อน)
+        if voice_client is None or not voice_client.is_connected():
+            async with voice_connect_lock:
+                # ตรวจซ้ำในล็อกอีกรอบ เผื่ออีก event ต่อไปแล้ว
+                vc_now = nextcord.utils.get(bot.voice_clients, guild=member.guild)
+                if vc_now is None or not vc_now.is_connected():
+                    print("กำลังเชื่อมต่อเข้าห้องเสียง...")
+                    voice_client = await voice_channel.connect(reconnect=False)  # ปิด auto reconnect เพื่อลดซ้อน
+                    print("เชื่อมต่อห้องเสียงแล้ว")
 
-        if before.self_deaf != after.self_deaf:
-            if after.self_deaf:
-                await play_tts(vc, f"{member.display_name} ปิดหูทำไม เมียด่าหรอ")
-            else:
-                await play_tts(vc, f"{member.display_name} เปิดหูแล้วจ้า")
-
-        last_voice_states[member.id] = after
-
-        if vc and len(voice_channel.members) == 1 and bot.user in voice_channel.members:
-            await asyncio.sleep(10)
-            if len(voice_channel.members) == 1:
-                await vc.disconnect()
-                print("Bot ออกจากห้องเพราะไม่มีใครอยู่")
+        # ====== ด้านล่าง: แจ้งเตือนเข้า/ออก/ปิดหู ฯลฯ ตามที่คุณทำ ======
+        # ตัวอย่าง:
+        # await play_tts(voice_client, f"{member.display_name} เข้ามาแล้วจ้า")
+        # ============================================================
 
     except Exception as e:
+        # กันล้มจากบั๊กภายใน nextcord / voice ws
         print(f"[ERROR] on_voice_state_update: {e}")
 
 @bot.event
