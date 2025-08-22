@@ -206,38 +206,51 @@ def _save_registered(d: dict[int, dict]):
 registered_users: dict[int, dict] = _load_registered()
 
 class RegisterModal(discord.ui.Modal, title="ลงทะเบียนสมาชิก 1AM SCUM TEAM"):
-    nickname = discord.ui.TextInput(label="ชื่อเล่น", placeholder="เช่น แมวไฟ", max_length=32)
-    age = discord.ui.TextInput(label="อายุ (ตัวเลข)", placeholder="เช่น 18", max_length=3)
+    nickname = discord.ui.TextInput(label="ชื่อเล่น", placeholder="เช่น ม็อปแม็ป", max_length=32)
+    age = discord.ui.TextInput(label="อายุ (ตัวเลข)", placeholder="เช่น 49", max_length=3)
 
-    async def on_submit(self, interaction: discord.Interaction):
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        # กันกดซ้ำ: ลงทะเบียนได้ครั้งเดียว
+        row = registered_users.get(interaction.user.id)
+        if row and row.get("nickname"):
+            await interaction.response.send_message(
+                "❌ คุณได้ลงทะเบียนไปแล้ว **ลงทะเบียนได้ครั้งเดียวต่อคน**",
+                ephemeral=True
+            )
+            return
+
         # ตรวจสอบอายุให้เป็นตัวเลข 1–120
         try:
             age_val = int(str(self.age.value).strip())
             if not (1 <= age_val <= 120):
                 raise ValueError
         except Exception:
-            return await interaction.response.send_message("กรุณากรอก **อายุเป็นตัวเลข 1–120**", ephemeral=True)
+            await interaction.response.send_message(
+                "กรุณากรอก **อายุเป็นตัวเลข 1–120**",
+                ephemeral=True
+            )
+            return
 
         member = interaction.user
         new_nick = f"{self.nickname.value} ({age_val})"
 
-        # เช็คสิทธิ์แก้ชื่อให้ปลอดภัยขึ้น
+        # เช็คสิทธิ์แก้ชื่อ
         me = interaction.guild.get_member(bot.user.id) or interaction.guild.me
         can_manage = bool(me and getattr(me, "guild_permissions", None) and me.guild_permissions.manage_nicknames)
         bot_top_pos = (me.top_role.position if (me and me.top_role) else 0)
         target_top_pos = (member.top_role.position if member.top_role else 0)
 
         changed_nick = False
-        try:
-            if can_manage and bot_top_pos > target_top_pos and member != interaction.guild.owner:
+        if can_manage and bot_top_pos > target_top_pos and member != interaction.guild.owner:
+            try:
                 await member.edit(nick=new_nick)
                 changed_nick = True
-        except discord.Forbidden:
-            pass
-        except Exception as e:
-            print(f"[REG] edit nick error: {e}", flush=True)
+            except discord.Forbidden:
+                pass
+            except Exception as e:
+                print(f"[REG] edit nick error: {e}", flush=True)
 
-        # upsert ลงทะเบียน
+        # บันทึกครั้งแรกเท่านั้น (one-time)
         registered_users[member.id] = {
             "nickname": str(self.nickname.value).strip(),
             "age": age_val,
@@ -245,22 +258,55 @@ class RegisterModal(discord.ui.Modal, title="ลงทะเบียนสม�
         }
         _save_registered(registered_users)
 
-        # ตอบกลับ
+        # สรุปผล (สไตล์เหมือนรูป)
         if changed_nick:
-            msg = f"✅ บันทึกข้อมูลแล้ว และเปลี่ยนชื่อเล่นเป็น `{new_nick}`"
+            msg = (
+                "✅ **ลงทะเบียนสำเร็จ!**\n"
+                f"ชื่อ:  `{self.nickname.value}`   │   อายุ:  `{age_val}`   →  **เปลี่ยนชื่อเป็น**  `{new_nick}`"
+            )
         else:
-            msg = (f"✅ บันทึกข้อมูลแล้วเป็น **{self.nickname.value} ({age_val})**\n"
-                   f"⚠️ แต่บอทไม่มีสิทธิ์/ลำดับ role ไม่พอในการเปลี่ยนชื่อให้คุณ")
+            msg = (
+                "✅ **ได้รับข้อมูลแล้ว**\n"
+                f"ชื่อ:  `{self.nickname.value}`   │   อายุ:  `{age_val}`\n"
+                "⚠️ แต่บอทไม่มีสิทธิ์/ลำดับ role ไม่พอในการเปลี่ยนชื่อให้คุณ"
+            )
         await interaction.response.send_message(msg, ephemeral=True)
+
+
+def make_register_panel_embed() -> discord.Embed:
+    today = datetime.datetime.now(TZ).strftime("%-d/%-m/%Y %H:%M") if hasattr(datetime, "datetime") else ""
+    desc = (
+        "📝 **ลงทะเบียนสมาชิก 1AM SCUM TEAM** 📝\n\n"
+        "คลิกปุ่ม **ลงทะเบียน** เพื่อกรอกชื่อเล่นและอายุ\n\n"
+        "**เงื่อนไข**\n"
+        "• ลงทะเบียนได้ **ครั้งเดียวต่อคน**\n"
+        "• ชื่อจะถูกตั้งเป็นรูปแบบ  `ชื่อเล่น  (อายุ)`\n"
+        "• หากบอทไม่สามารถเปลี่ยนชื่อได้ แสดงว่า**บอทถูกจำกัดสิทธิ์**\n\n"
+        "**วิธีใช้งาน**\n"
+        "1) กดปุ่มด้านล่าง\n"
+        "2) กรอก **ชื่อเล่น** และ **อายุ**\n"
+        "3) กดส่ง แล้วรอสรุปผล\n\n"
+        "**ตัวอย่างผลลัพธ์**\n"
+        "ชื่อ:  `ม็อปแป็ป`   │   อายุ:  `49`   →  **เปลี่ยนชื่อเป็น**  `ม็อปแม็ป (49)`"
+    )
+    emb = discord.Embed(title=PANEL_TITLE, description=desc, color=0x2ecc71)
+    emb.set_footer(text="MF_BOT • ระบบลงทะเบียน")
+    return emb
+
 
 class RegisterView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)  # persistent
     @discord.ui.button(label="ลงทะเบียน", style=discord.ButtonStyle.success, custom_id="reg_open_modal")
     async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # เปิด Modal เสมอ (ใช้เป็นอัปเดตได้)
+        # ถ้าลงทะเบียนแล้ว -> ไม่ให้กดซ้ำ
+        if interaction.user.id in registered_users and registered_users[interaction.user.id].get("nickname"):
+            return await interaction.response.send_message(
+                "❌ คุณได้ลงทะเบียนไปแล้ว **ลงทะเบียนได้ครั้งเดียวต่อคน**",
+                ephemeral=True
+            )
         await interaction.response.send_modal(RegisterModal())
-
+        
 # ---------------- Raid Check state (JSON) ----------------
 RAID_STATE_FILE = "raid_state.json"
 def load_raid_state():
@@ -287,7 +333,7 @@ class RaidCheckView(discord.ui.View):
         super().__init__(timeout=None)
         self.message_id = message_id
 
-    @discord.ui.button(label="✅ ตอบรับ", style=discord.ButtonStyle.success, custom_id="raid_accept_btn")
+    @discord.ui.button(label="✅ ลุย !!", style=discord.ButtonStyle.success, custom_id="raid_accept_btn")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             channel = interaction.guild.get_channel(CHECKRAID_CHANNEL_ID)
@@ -339,7 +385,7 @@ class MainPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="เริ่มเช็คชื่อวันนี้", style=discord.ButtonStyle.primary, emoji="📋", custom_id="panel_start_raid_check")
+    @discord.ui.button(label="Check Raid", style=discord.ButtonStyle.primary, emoji="⚔️", custom_id="panel_start_raid_check")
     async def start_raid_check(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.channel.id != BOT_CHANNEL_ID:
             return await interaction.response.send_message("❌ ใช้ปุ่มนี้ได้เฉพาะในห้อง BOT", ephemeral=True)
@@ -352,7 +398,7 @@ class MainPanelView(discord.ui.View):
         role_mention = f"<@&{ROLE_ID}>"
 
         embed = discord.Embed(
-            title="🌅 เช็คชื่อ Raid/Protect",
+            title="⚔️ เช็คชื่อ Raid/Protect 🛡️",
             description=f"วันที่ **{today}**\n{role_mention} โปรดเช็คชื่อด้วยปุ่ม/รีแอคชันด้านล่าง",
             color=0x00C853
         )
@@ -391,7 +437,7 @@ class MainPanelView(discord.ui.View):
         await interaction.channel.send(embed=embed, view=RegisterView())
         await interaction.response.send_message("✅ ส่งปุ่มลงทะเบียนแล้ว", ephemeral=True)
 
-    @discord.ui.button(label="ส่งปุ่ม Alarm (DM Role)", style=discord.ButtonStyle.danger, emoji="🚨", custom_id="panel_send_alarm")
+    @discord.ui.button(label=" Alarm (DM Role)", style=discord.ButtonStyle.danger, emoji="🚨", custom_id="panel_send_alarm")
     async def send_alarm(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
             title="🚨 Alarm Sender",
