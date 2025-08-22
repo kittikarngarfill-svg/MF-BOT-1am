@@ -68,7 +68,7 @@ CHECKRAID_CHANNEL_ID = int(os.getenv("CHECKRAID_CHANNEL_ID", "138597187707967900
 WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "1342083527067304030"))
 GOODBYE_CHANNEL_ID = int(os.getenv("GOODBYE_CHANNEL_ID", "1342083527067304030"))
 ENABLE_VOICE = os.getenv("ENABLE_VOICE", "1") == "1"
-
+PANEL_TITLE = "🥇 1am SCUM TEAM 🥇"
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Bangkok"))
 SUMMARY_HOUR = int(os.getenv("RAID_SUMMARY_HOUR", "19"))  # 19:00 ตามเวลาไทย
 
@@ -180,73 +180,85 @@ async def play_tts(vc: discord.VoiceClient | None, text: str):
     except Exception as e:
         print(f"[ERROR] ffmpeg/voice play failed: {e}", flush=True)
 
-# ---------------- Registration (one-time with JSON) ----------------
+# ---------------- Registration (JSON dict; อัปเดตได้) ----------------
 REG_FILE = "registered_users.json"
-def _load_registered() -> set[int]:
+
+def _load_registered() -> dict[int, dict]:
     try:
         with open(REG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return set(int(x) for x in data)
+        # รองรับทั้งรูปแบบเก่า (list user_id) และใหม่ (dict)
+        if isinstance(data, list):
+            return {int(uid): {"nickname": None, "age": None, "updated_at": None} for uid in data}
+        if isinstance(data, dict):
+            return {int(k): v for k, v in data.items()}
+        return {}
     except Exception:
-        return set()
+        return {}
 
-def _save_registered(s: set[int]):
+def _save_registered(d: dict[int, dict]):
     try:
         with open(REG_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(s), f)
+            json.dump({str(k): v for k, v in d.items()}, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[WARN] Save registered failed: {e}", flush=True)
 
-registered_users = _load_registered()
+registered_users: dict[int, dict] = _load_registered()
 
-class RegisterModal(discord.ui.Modal, title="ลงทะเบียนสมาชิก 1am SCUM TEAM"):
-    nickname = discord.ui.TextInput(label="ชื่อเล่น", placeholder="ใส่ชื่อเล่นของคุณ", max_length=32)
-    age = discord.ui.TextInput(label="อายุ", placeholder="ใส่อายุของคุณ", max_length=3)
+class RegisterModal(discord.ui.Modal, title="ลงทะเบียนสมาชิก 1AM SCUM TEAM"):
+    nickname = discord.ui.TextInput(label="ชื่อเล่น", placeholder="เช่น แมวไฟ", max_length=32)
+    age = discord.ui.TextInput(label="อายุ (ตัวเลข)", placeholder="เช่น 18", max_length=3)
 
     async def on_submit(self, interaction: discord.Interaction):
-        user_id = interaction.user.id
-        if user_id in registered_users:
-            await interaction.response.send_message("❌ คุณลงทะเบียนไปแล้ว ไม่สามารถลงทะเบียนซ้ำได้ครับ", ephemeral=True)
-            return
+        # ตรวจสอบอายุให้เป็นตัวเลข 1–120
+        try:
+            age_val = int(str(self.age.value).strip())
+            if not (1 <= age_val <= 120):
+                raise ValueError
+        except Exception:
+            return await interaction.response.send_message("กรุณากรอก **อายุเป็นตัวเลข 1–120**", ephemeral=True)
 
         member = interaction.user
-        new_nick = f"{self.nickname.value} ({self.age.value})"
+        new_nick = f"{self.nickname.value} ({age_val})"
+
+        # เช็คสิทธิ์แก้ชื่อให้ปลอดภัยขึ้น
+        me = interaction.guild.get_member(bot.user.id) or interaction.guild.me
+        can_manage = bool(me and getattr(me, "guild_permissions", None) and me.guild_permissions.manage_nicknames)
+        bot_top_pos = (me.top_role.position if (me and me.top_role) else 0)
+        target_top_pos = (member.top_role.position if member.top_role else 0)
+
+        changed_nick = False
         try:
-            me = interaction.guild.get_member(bot.user.id) or interaction.guild.me
-            can_manage = me.guild_permissions.manage_nicknames if me else False
-            bot_top_pos = me.top_role.position if me and me.top_role else -1
-            target_top_pos = member.top_role.position if member.top_role else -1
-
-            if not can_manage or bot_top_pos <= target_top_pos or member == interaction.guild.owner:
-                await interaction.response.send_message(
-                    f"✅ ได้รับข้อมูลแล้ว\nชื่อเล่น: {self.nickname.value}\nอายุ: {self.age.value}\n"
-                    f"⚠️ แต่บอทไม่มีสิทธิ์/ลำดับ role ไม่พอในการเปลี่ยนชื่อให้คุณ\n"
-                    f"กรุณาให้แอดมินย้าย role ของบอทไว้สูงกว่า หรือให้สิทธิ์ Manage Nicknames",
-                    ephemeral=True
-                )
-                registered_users.add(user_id)
-                _save_registered(registered_users)
-                return
-
-            await member.edit(nick=new_nick)
-            registered_users.add(user_id)
-            _save_registered(registered_users)
-            await interaction.response.send_message(
-                f"✅ ลงทะเบียนสำเร็จ! ชื่อเล่นถูกเปลี่ยนเป็น `{new_nick}`", ephemeral=True
-            )
+            if can_manage and bot_top_pos > target_top_pos and member != interaction.guild.owner:
+                await member.edit(nick=new_nick)
+                changed_nick = True
         except discord.Forbidden:
-            await interaction.response.send_message("❌ บอทไม่มีสิทธิ์เปลี่ยนชื่อคุณ!", ephemeral=True)
+            pass
         except Exception as e:
-            await interaction.response.send_message(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
+            print(f"[REG] edit nick error: {e}", flush=True)
+
+        # upsert ลงทะเบียน
+        registered_users[member.id] = {
+            "nickname": str(self.nickname.value).strip(),
+            "age": age_val,
+            "updated_at": datetime.datetime.utcnow().isoformat()
+        }
+        _save_registered(registered_users)
+
+        # ตอบกลับ
+        if changed_nick:
+            msg = f"✅ บันทึกข้อมูลแล้ว และเปลี่ยนชื่อเล่นเป็น `{new_nick}`"
+        else:
+            msg = (f"✅ บันทึกข้อมูลแล้วเป็น **{self.nickname.value} ({age_val})**\n"
+                   f"⚠️ แต่บอทไม่มีสิทธิ์/ลำดับ role ไม่พอในการเปลี่ยนชื่อให้คุณ")
+        await interaction.response.send_message(msg, ephemeral=True)
 
 class RegisterView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=None)
+        super().__init__(timeout=None)  # persistent
     @discord.ui.button(label="ลงทะเบียน", style=discord.ButtonStyle.success, custom_id="reg_open_modal")
     async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id in registered_users:
-            await interaction.response.send_message("❌ คุณลงทะเบียนไปแล้ว ไม่สามารถลงทะเบียนซ้ำได้ครับ", ephemeral=True)
-            return
+        # เปิด Modal เสมอ (ใช้เป็นอัปเดตได้)
         await interaction.response.send_modal(RegisterModal())
 
 # ---------------- Raid Check state (JSON) ----------------
@@ -270,7 +282,7 @@ raid_state = load_raid_state()
 
 # ---------------- Raid Check Views ----------------
 class RaidCheckView(discord.ui.View):
-    """ปุ่มที่แปะบนข้อความเช็คชื่อในห้อง CheckRaid ให้กด 'ตอบรับ' / 'ไม่สะดวก' โดยจะเพิ่มรีแอคชันในข้อความนั้น"""
+    """ปุ่มที่แปะบนข้อความเช็คชื่อในห้อง CheckRaid ให้กด 'ตอบรับ' / 'ไม่สะดวก' """
     def __init__(self, message_id: int):
         super().__init__(timeout=None)
         self.message_id = message_id
@@ -282,8 +294,6 @@ class RaidCheckView(discord.ui.View):
             if not isinstance(channel, discord.TextChannel):
                 return await interaction.response.send_message("❌ ไม่พบห้องเช็คชื่อ", ephemeral=True)
             msg = await channel.fetch_message(self.message_id)
-            # เพิ่ม reaction ✅ ในฐานะผู้ใช้ (ทำไม่ได้ตรงๆ) — เราให้บอทเพิ่ม แล้วบอกให้ผู้ใช้แสดงตัวด้วยการกดปุ่ม
-            # เพื่อให้ “นับ” ได้, เรา tag ผู้ใช้ไว้ที่ reply
             await msg.add_reaction("✅")
             await interaction.response.send_message("บันทึกการตอบรับ ✅ แล้วครับ", ephemeral=True)
         except Exception as e:
@@ -346,17 +356,15 @@ class MainPanelView(discord.ui.View):
             description=f"วันที่ **{today}**\n{role_mention} โปรดเช็คชื่อด้วยปุ่ม/รีแอคชันด้านล่าง",
             color=0x00C853
         )
-        msg = await check_ch.send(embed=embed, view=RaidCheckView(0))  # ใส่ 0 ก่อน เดี๋ยวแก้ทีหลัง
-        # เพิ่มปุ่มให้ชี้ message_id ที่ถูกต้อง (persistent view ต้องใช้ custom_id เดียวกัน; โค้ดนี้สร้างใหม่ให้)
-        await msg.edit(view=RaidCheckView(msg.id))
-        # เพิ่มรีแอคชันไกด์
+        msg = await check_ch.send(embed=embed, view=RaidCheckView(0))  # ใส่ 0 ก่อน
+        await msg.edit(view=RaidCheckView(msg.id))  # ผูก message_id จริง
+
         try:
             await msg.add_reaction("✅")
             await msg.add_reaction("❌")
         except:
             pass
 
-        # บันทึก state
         raid_state["current"] = {
             "date": today,
             "channel_id": check_ch.id,
@@ -376,7 +384,7 @@ class MainPanelView(discord.ui.View):
     async def send_register(self, interaction: discord.Interaction, button: discord.ui.Button):
         embed = discord.Embed(
             title="📋 ลงทะเบียนสมาชิก",
-            description="กดปุ่มด้านล่างเพื่อเปิดฟอร์มกรอกชื่อเล่นและอายุ\n(ลงทะเบียนได้ครั้งเดียว)",
+            description="กดปุ่มด้านล่างเพื่อเปิดฟอร์มกรอก **ชื่อเล่น** และ **อายุ**\n(กดซ้ำ = อัปเดตข้อมูลได้)",
             color=0x42A5F5
         )
         embed.set_footer(text="MF_BOT • Registration")
@@ -422,7 +430,7 @@ async def do_raid_summary(force: bool = False) -> str:
     for r in msg.reactions:
         try:
             if str(r.emoji) == "✅":
-                yes += r.count - 1 if r.me else r.count  # ลบของบอทออกถ้าใส่เอง
+                yes += r.count - 1 if r.me else r.count
             if str(r.emoji) == "❌":
                 no += r.count - 1 if r.me else r.count
         except:
@@ -468,7 +476,7 @@ async def cmd_panel(ctx: commands.Context):
         description=(
             "• **เริ่มเช็คชื่อวันนี้**: สร้างโพสต์เช็คชื่อที่ห้องเช็คชื่อ พร้อมปุ่ม/รีแอคชัน\n"
             "• **ส่งสรุปตอนนี้**: นับผลและสรุปทันที (ไม่ต้องรอ 19:00)\n"
-            "• **ส่งปุ่มลงทะเบียน**: เปิดฟอร์มลงทะเบียน (ชื่อเล่น/อายุ) — ลงได้ครั้งเดียว\n"
+            "• **ส่งปุ่มลงทะเบียน**: เปิดฟอร์มลงทะเบียน (ชื่อเล่น/อายุ) — กดซ้ำเพื่ออัปเดตได้\n"
             "• **ส่งปุ่ม Alarm (DM Role)**: ส่งปุ่มแจ้งเตือน DM หา Role เป้าหมาย"
         ),
         color=0xFFD700
@@ -518,11 +526,33 @@ async def cmd_checkin(ctx: commands.Context):
 async def cmd_register(ctx: commands.Context):
     embed = discord.Embed(
         title="📋 ลงทะเบียนสมาชิก",
-        description="กดปุ่มด้านล่างเพื่อเปิดฟอร์มกรอกชื่อเล่นและอายุ\n(ลงทะเบียนได้ครั้งเดียว)",
+        description="กดปุ่มด้านล่างเพื่อเปิดฟอร์มกรอก **ชื่อเล่น** และ **อายุ**\n(กดซ้ำ = อัปเดตข้อมูลได้)",
         color=0x42A5F5
     )
     embed.set_footer(text="MF_BOT • Registration")
     await ctx.send(embed=embed, view=RegisterView())
+
+@bot.command(name="myinfo")
+async def cmd_myinfo(ctx: commands.Context):
+    row = registered_users.get(ctx.author.id)
+    if not row or not row.get("nickname"):
+        return await ctx.reply("ยังไม่มีข้อมูลลงทะเบียนของคุณ ลองกดปุ่ม **ลงทะเบียน** ก่อนนะครับ", mention_author=False)
+    emb = discord.Embed(title="ข้อมูลของคุณ", color=0x3498db)
+    emb.add_field(name="ชื่อเล่น", value=row["nickname"])
+    emb.add_field(name="อายุ", value=str(row["age"]))
+    if row.get("updated_at"):
+        emb.add_field(name="อัปเดตล่าสุด (UTC)", value=row["updated_at"].split("T")[0], inline=False)
+    emb.set_thumbnail(url=ctx.author.display_avatar.url)
+    await ctx.reply(embed=emb, mention_author=False)
+
+@bot.command(name="unregister")
+async def cmd_unregister(ctx: commands.Context):
+    if ctx.author.id in registered_users:
+        registered_users.pop(ctx.author.id, None)
+        _save_registered(registered_users)
+        await ctx.reply("ลบข้อมูลลงทะเบียนของคุณแล้ว ✅", mention_author=False)
+    else:
+        await ctx.reply("ไม่พบบันทึกของคุณนะครับ", mention_author=False)
 
 @bot.command()
 async def ping(ctx: commands.Context):
@@ -559,6 +589,8 @@ async def on_member_remove(member: discord.Member):
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user} ({bot.user.id})", flush=True)
+
+    # เริ่ม tasks (กันซ้ำด้วย try/except)
     try:
         update_status.start()
     except RuntimeError:
@@ -568,11 +600,21 @@ async def on_ready():
     except RuntimeError:
         pass
 
-    # Persistent views (ให้ปุ่มใช้ได้หลังรีสตาร์ท)
+    # ---------- Restore persistent views ----------
     bot.add_view(MainPanelView())
     bot.add_view(RoleMessageView())
     bot.add_view(RegisterView())
-    # หมายเหตุ: RaidCheckView ต้องสร้างใหม่พร้อม message_id ตอนโพสต์ จึงไม่ add_view ที่นี่
+
+    # คืนสภาพปุ่มของโพสต์เช็คชื่อเดิม (ถ้ามี)
+    try:
+        cur = raid_state.get("current")
+        if cur and isinstance(cur.get("message_id"), int):
+            bot.add_view(RaidCheckView(cur["message_id"]))
+            print(f"[RESTORE] RaidCheckView restored for message_id={cur['message_id']}", flush=True)
+        else:
+            print("[RESTORE] No raid_check message to restore", flush=True)
+    except Exception as e:
+        print(f"[RESTORE] Failed to restore RaidCheckView: {e}", flush=True)
 
 @tasks.loop(seconds=STATUS_UPDATE_INTERVAL)
 async def update_status():
