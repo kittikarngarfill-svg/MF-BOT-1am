@@ -17,6 +17,7 @@ import traceback
 import asyncio
 import shutil
 import datetime
+from zoneinfo import ZoneInfo
 import aiohttp
 
 from dotenv import load_dotenv
@@ -60,14 +61,16 @@ VC_CHANNEL_ID = require_env("VC_CHANNEL_ID", int)
 TEXT_CHANNEL_ID = require_env("TEXT_CHANNEL_ID", int)
 STATUS_UPDATE_INTERVAL = int(os.getenv("STATUS_UPDATE_INTERVAL", "30"))
 
-# ค่าเสริม (แก้หรือใส่ใน .env ได้)
+# ค่าเสริม (แก้/ใส่ใน .env ได้)
 ROLE_ID = int(os.getenv("ROLE_ID", "1372176652989239336"))
 BOT_CHANNEL_ID = int(os.getenv("BOT_CHANNEL_ID", "1403316515956064327"))
 CHECKRAID_CHANNEL_ID = int(os.getenv("CHECKRAID_CHANNEL_ID", "1385971877079679006"))
 WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "1342083527067304030"))
 GOODBYE_CHANNEL_ID = int(os.getenv("GOODBYE_CHANNEL_ID", "1342083527067304030"))
-
 ENABLE_VOICE = os.getenv("ENABLE_VOICE", "1") == "1"
+
+TZ = ZoneInfo(os.getenv("TIMEZONE", "Asia/Bangkok"))
+SUMMARY_HOUR = int(os.getenv("RAID_SUMMARY_HOUR", "19"))  # 19:00 ตามเวลาไทย
 
 print(f"[BOOT] ENV ok | guild={GUILD_ID} vc={VC_CHANNEL_ID} text={TEXT_CHANNEL_ID} "
       f"role={ROLE_ID} checkraid={CHECKRAID_CHANNEL_ID} voice={ENABLE_VOICE}", flush=True)
@@ -76,7 +79,12 @@ print(f"[BOOT] ENV ok | guild={GUILD_ID} vc={VC_CHANNEL_ID} text={TEXT_CHANNEL_I
 intents = discord.Intents.all()
 intents.members = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+bot = commands.Bot(
+    command_prefix=commands.when_mentioned_or("!"),
+    intents=intents,
+    case_insensitive=True
+)
 
 # ---------------- Signal & on_error hooks ----------------
 def _graceful_shutdown(signum, frame):
@@ -98,6 +106,28 @@ async def on_error(event_method, *args, **kwargs):
     print(f"[on_error] in {event_method}", flush=True)
     traceback.print_exc()
 
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        return
+    if isinstance(error, commands.CheckFailure):
+        return
+    try:
+        await ctx.send(f"❌ เกิดข้อผิดพลาด: `{type(error).__name__}` — {error}")
+    except Exception:
+        pass
+    print(f"[CMD-ERROR] In {getattr(ctx, 'command', None)}: {repr(error)}", flush=True)
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    try:
+        print(f"[MSG] #{getattr(message.channel, 'name', '?')} <{message.author}>: {message.content}", flush=True)
+    except Exception:
+        pass
+    await bot.process_commands(message)
+
 # ---------------- Voice prerequisites ----------------
 FFMPEG_OK = shutil.which("ffmpeg") is not None
 if ENABLE_VOICE:
@@ -105,8 +135,7 @@ if ENABLE_VOICE:
         print("[WARN] ffmpeg not found - เสียงจะเล่นไม่ได้", flush=True)
     try:
         if not discord.opus.is_loaded():
-            # ใน Docker Debian/Ubuntu ไลบรารีชื่อ libopus.so.0
-            discord.opus.load_opus("libopus.so.0")
+            discord.opus.load_opus("libopus.so.0")  # Debian/Ubuntu
         print("[OK] Opus loaded", flush=True)
     except Exception as e:
         print(f"[ERROR] load Opus failed: {e}", flush=True)
@@ -120,7 +149,6 @@ def non_bot_count(ch: discord.VoiceChannel) -> int:
     return sum(1 for m in ch.members if not m.bot)
 
 def tts_url(text: str) -> str:
-    # Google TTS แบบง่าย (สำหรับทดสอบ)
     return f"https://translate.google.com/translate_tts?ie=UTF-8&q={text}&tl=th&client=tw-ob"
 
 async def play_tts(vc: discord.VoiceClient | None, text: str):
@@ -131,7 +159,6 @@ async def play_tts(vc: discord.VoiceClient | None, text: str):
     if not FFMPEG_OK:
         print("[WARN] Skip TTS: ffmpeg not installed", flush=True)
         return
-
     url = tts_url(text)
     try:
         async with aiohttp.ClientSession() as session:
@@ -153,7 +180,7 @@ async def play_tts(vc: discord.VoiceClient | None, text: str):
     except Exception as e:
         print(f"[ERROR] ffmpeg/voice play failed: {e}", flush=True)
 
-# ---------------- Registration (one-time) ----------------
+# ---------------- Registration (one-time with JSON) ----------------
 REG_FILE = "registered_users.json"
 def _load_registered() -> set[int]:
     try:
@@ -184,9 +211,7 @@ class RegisterModal(discord.ui.Modal, title="ลงทะเบียนสม�
 
         member = interaction.user
         new_nick = f"{self.nickname.value} ({self.age.value})"
-
         try:
-            # ตรวจสิทธิ์เปลี่ยนชื่อ + ลำดับ role
             me = interaction.guild.get_member(bot.user.id) or interaction.guild.me
             can_manage = me.guild_permissions.manage_nicknames if me else False
             bot_top_pos = me.top_role.position if me and me.top_role else -1
@@ -199,7 +224,6 @@ class RegisterModal(discord.ui.Modal, title="ลงทะเบียนสม�
                     f"กรุณาให้แอดมินย้าย role ของบอทไว้สูงกว่า หรือให้สิทธิ์ Manage Nicknames",
                     ephemeral=True
                 )
-                # กันลงทะเบียนซ้ำ
                 registered_users.add(user_id)
                 _save_registered(registered_users)
                 return
@@ -207,9 +231,8 @@ class RegisterModal(discord.ui.Modal, title="ลงทะเบียนสม�
             await member.edit(nick=new_nick)
             registered_users.add(user_id)
             _save_registered(registered_users)
-
             await interaction.response.send_message(
-                f"✅ ลงทะเบียนสำเร็จ!\nชื่อเล่นถูกเปลี่ยนเป็น `{new_nick}`", ephemeral=True
+                f"✅ ลงทะเบียนสำเร็จ! ชื่อเล่นถูกเปลี่ยนเป็น `{new_nick}`", ephemeral=True
             )
         except discord.Forbidden:
             await interaction.response.send_message("❌ บอทไม่มีสิทธิ์เปลี่ยนชื่อคุณ!", ephemeral=True)
@@ -219,71 +242,277 @@ class RegisterModal(discord.ui.Modal, title="ลงทะเบียนสม�
 class RegisterView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-
-    @discord.ui.button(label="ลงทะเบียน", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="ลงทะเบียน", style=discord.ButtonStyle.success, custom_id="reg_open_modal")
     async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id in registered_users:
             await interaction.response.send_message("❌ คุณลงทะเบียนไปแล้ว ไม่สามารถลงทะเบียนซ้ำได้ครับ", ephemeral=True)
             return
         await interaction.response.send_modal(RegisterModal())
 
-# ---------------- Buttons: Alarm to Role ----------------
+# ---------------- Raid Check state (JSON) ----------------
+RAID_STATE_FILE = "raid_state.json"
+def load_raid_state():
+    try:
+        with open(RAID_STATE_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"current": None}
+
+def save_raid_state(state):
+    try:
+        with open(RAID_STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump(state, f)
+    except Exception as e:
+        print(f"[WARN] save raid_state failed: {e}", flush=True)
+
+raid_state = load_raid_state()
+# raid_state = {"current": {"date":"YYYY-MM-DD","channel_id": int,"message_id": int,"summary_sent": bool}}
+
+# ---------------- Raid Check Views ----------------
+class RaidCheckView(discord.ui.View):
+    """ปุ่มที่แปะบนข้อความเช็คชื่อในห้อง CheckRaid ให้กด 'ตอบรับ' / 'ไม่สะดวก' โดยจะเพิ่มรีแอคชันในข้อความนั้น"""
+    def __init__(self, message_id: int):
+        super().__init__(timeout=None)
+        self.message_id = message_id
+
+    @discord.ui.button(label="✅ ตอบรับ", style=discord.ButtonStyle.success, custom_id="raid_accept_btn")
+    async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            channel = interaction.guild.get_channel(CHECKRAID_CHANNEL_ID)
+            if not isinstance(channel, discord.TextChannel):
+                return await interaction.response.send_message("❌ ไม่พบห้องเช็คชื่อ", ephemeral=True)
+            msg = await channel.fetch_message(self.message_id)
+            # เพิ่ม reaction ✅ ในฐานะผู้ใช้ (ทำไม่ได้ตรงๆ) — เราให้บอทเพิ่ม แล้วบอกให้ผู้ใช้แสดงตัวด้วยการกดปุ่ม
+            # เพื่อให้ “นับ” ได้, เรา tag ผู้ใช้ไว้ที่ reply
+            await msg.add_reaction("✅")
+            await interaction.response.send_message("บันทึกการตอบรับ ✅ แล้วครับ", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ ไม่สามารถบันทึกได้: {e}", ephemeral=True)
+
+    @discord.ui.button(label="❌ ไม่สะดวก", style=discord.ButtonStyle.danger, custom_id="raid_decline_btn")
+    async def decline(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            channel = interaction.guild.get_channel(CHECKRAID_CHANNEL_ID)
+            if not isinstance(channel, discord.TextChannel):
+                return await interaction.response.send_message("❌ ไม่พบห้องเช็คชื่อ", ephemeral=True)
+            msg = await channel.fetch_message(self.message_id)
+            await msg.add_reaction("❌")
+            await interaction.response.send_message("รับทราบสถานะ ❌ แล้วครับ", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ ไม่สามารถบันทึกได้: {e}", ephemeral=True)
+
 class RoleMessageView(discord.ui.View):
+    """ปุ่ม Alarm DM หา Role"""
     def __init__(self):
         super().__init__(timeout=None)
-
-    @discord.ui.button(label="Alarm", style=discord.ButtonStyle.danger, emoji="🚨")
+    @discord.ui.button(label="Alarm", style=discord.ButtonStyle.danger, emoji="🚨", custom_id="alarm_dm_role")
     async def alarm_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.send_to_role(interaction, "📢 นี่คือข้อความจาก MF_BOT จ้า! ขอความร่วมมือเข้าดิสด่วนน !!")
-
     async def send_to_role(self, interaction: discord.Interaction, message_text: str):
         role = interaction.guild.get_role(ROLE_ID)
         if not role:
-            await interaction.response.send_message("❌ ไม่พบบทบาทนี้", ephemeral=True)
-            return
-
+            return await interaction.response.send_message("❌ ไม่พบบทบาทนี้", ephemeral=True)
         sent = 0
-        for member in role.members:
+        for m in role.members:
+            if m.bot:
+                continue
             try:
-                if not member.bot:
-                    await member.send(message_text)
-                    sent += 1
-                    await asyncio.sleep(0.5)  # กัน rate limit
+                await m.send(message_text)
+                sent += 1
+                await asyncio.sleep(0.4)
             except:
                 pass
         await interaction.response.send_message(f"📨 ส่งข้อความให้ {sent} คนแล้ว", ephemeral=True)
 
+class MainPanelView(discord.ui.View):
+    """แผงควบคุมหลัก (โพสต์ในห้อง BOT)"""
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="เริ่มเช็คชื่อวันนี้", style=discord.ButtonStyle.primary, emoji="📋", custom_id="panel_start_raid_check")
+    async def start_raid_check(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.channel.id != BOT_CHANNEL_ID:
+            return await interaction.response.send_message("❌ ใช้ปุ่มนี้ได้เฉพาะในห้อง BOT", ephemeral=True)
+
+        check_ch = interaction.guild.get_channel(CHECKRAID_CHANNEL_ID)
+        if not isinstance(check_ch, discord.TextChannel):
+            return await interaction.response.send_message("❌ ไม่พบบห้องเช็คชื่อที่ตั้งค่าไว้", ephemeral=True)
+
+        today = datetime.datetime.now(TZ).strftime("%Y-%m-%d")
+        role_mention = f"<@&{ROLE_ID}>"
+
+        embed = discord.Embed(
+            title="🌅 เช็คชื่อ Raid/Protect",
+            description=f"วันที่ **{today}**\n{role_mention} โปรดเช็คชื่อด้วยปุ่ม/รีแอคชันด้านล่าง",
+            color=0x00C853
+        )
+        msg = await check_ch.send(embed=embed, view=RaidCheckView(0))  # ใส่ 0 ก่อน เดี๋ยวแก้ทีหลัง
+        # เพิ่มปุ่มให้ชี้ message_id ที่ถูกต้อง (persistent view ต้องใช้ custom_id เดียวกัน; โค้ดนี้สร้างใหม่ให้)
+        await msg.edit(view=RaidCheckView(msg.id))
+        # เพิ่มรีแอคชันไกด์
+        try:
+            await msg.add_reaction("✅")
+            await msg.add_reaction("❌")
+        except:
+            pass
+
+        # บันทึก state
+        raid_state["current"] = {
+            "date": today,
+            "channel_id": check_ch.id,
+            "message_id": msg.id,
+            "summary_sent": False
+        }
+        save_raid_state(raid_state)
+
+        await interaction.response.send_message(f"✅ สร้างโพสต์เช็คชื่อแล้วใน <#{CHECKRAID_CHANNEL_ID}>", ephemeral=True)
+
+    @discord.ui.button(label="ส่งสรุปตอนนี้", style=discord.ButtonStyle.secondary, emoji="🧾", custom_id="panel_force_summary")
+    async def force_summary(self, interaction: discord.Interaction, button: discord.ui.Button):
+        res = await do_raid_summary(force=True)
+        await interaction.response.send_message(res, ephemeral=True)
+
+    @discord.ui.button(label="ส่งปุ่มลงทะเบียน", style=discord.ButtonStyle.success, emoji="📝", custom_id="panel_send_register")
+    async def send_register(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="📋 ลงทะเบียนสมาชิก",
+            description="กดปุ่มด้านล่างเพื่อเปิดฟอร์มกรอกชื่อเล่นและอายุ\n(ลงทะเบียนได้ครั้งเดียว)",
+            color=0x42A5F5
+        )
+        embed.set_footer(text="MF_BOT • Registration")
+        await interaction.channel.send(embed=embed, view=RegisterView())
+        await interaction.response.send_message("✅ ส่งปุ่มลงทะเบียนแล้ว", ephemeral=True)
+
+    @discord.ui.button(label="ส่งปุ่ม Alarm (DM Role)", style=discord.ButtonStyle.danger, emoji="🚨", custom_id="panel_send_alarm")
+    async def send_alarm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = discord.Embed(
+            title="🚨 Alarm Sender",
+            description="กดปุ่มด้านล่างเพื่อ DM แจ้งเตือนไปยัง Role เป้าหมาย",
+            color=0xF44336
+        )
+        await interaction.channel.send(embed=embed, view=RoleMessageView())
+        await interaction.response.send_message("✅ ส่งปุ่ม Alarm แล้ว", ephemeral=True)
+
+# ---------------- สรุปเช็คชื่อ ----------------
+async def do_raid_summary(force: bool = False) -> str:
+    """นับรีแอคชัน ✅/❌ จากโพสต์เช็คชื่อของวันนี้ และส่งสรุปในห้องเช็คชื่อ (ครั้งเดียว/หรือ force)"""
+    cur = raid_state.get("current")
+    if not cur:
+        return "❌ ยังไม่มีโพสต์เช็คชื่อของวันนี้"
+
+    today = datetime.datetime.now(TZ).strftime("%Y-%m-%d")
+    if cur["date"] != today and not force:
+        return "❌ โพสต์เช็คชื่อที่บันทึกไว้ไม่ใช่ของวันนี้"
+
+    if cur.get("summary_sent") and not force:
+        return "ℹ️ วันนี้ส่งสรุปไปแล้ว"
+
+    guild = bot.get_guild(GUILD_ID)
+    ch = guild.get_channel(cur["channel_id"]) if guild else None
+    if not isinstance(ch, discord.TextChannel):
+        return "❌ ไม่พบห้องเช็คชื่อ"
+
+    try:
+        msg = await ch.fetch_message(cur["message_id"])
+    except Exception as e:
+        return f"❌ หาโพสต์เช็คชื่อไม่พบ: {e}"
+
+    yes = 0
+    no = 0
+    for r in msg.reactions:
+        try:
+            if str(r.emoji) == "✅":
+                yes += r.count - 1 if r.me else r.count  # ลบของบอทออกถ้าใส่เอง
+            if str(r.emoji) == "❌":
+                no += r.count - 1 if r.me else r.count
+        except:
+            pass
+
+    total = yes + no
+    embed = discord.Embed(
+        title=f"🧾 สรุปเช็คชื่อ • {cur['date']}",
+        description=f"**ตอบรับ:** {yes} คน\n**ไม่สะดวก:** {no} คน\n**รวม:** {total} คน",
+        color=0x009688
+    )
+    await ch.send(embed=embed)
+
+    cur["summary_sent"] = True
+    raid_state["current"] = cur
+    save_raid_state(raid_state)
+    return "✅ ส่งสรุปแล้ว"
+
+@tasks.loop(minutes=1)
+async def raid_summary_scheduler():
+    """เช็คทุกนาที — ถ้าเวลา = 19:00 ตาม TZ และยังไม่ส่งสรุปของวันนี้ ก็ส่ง"""
+    now = datetime.datetime.now(TZ)
+    if now.hour == SUMMARY_HOUR and now.minute in (0, 1, 2):  # เผื่อ 3 นาทีแรก
+        cur = raid_state.get("current")
+        if not cur:
+            return
+        if cur["date"] != now.strftime("%Y-%m-%d"):
+            return
+        if not cur.get("summary_sent"):
+            print("[SCHED] Auto summary at 19:00", flush=True)
+            try:
+                await do_raid_summary(force=False)
+            except Exception as e:
+                print(f"[SCHED] summary error: {e}", flush=True)
+
 # ---------------- Commands ----------------
+@bot.command(name="panel")
+@commands.has_permissions(manage_guild=True)
+async def cmd_panel(ctx: commands.Context):
+    """ส่งแผงควบคุมไปในห้องปัจจุบัน (แนะนำใช้ในห้อง BOT)"""
+    embed = discord.Embed(
+        title="🛠️ MF_BOT Control Panel",
+        description=(
+            "• **เริ่มเช็คชื่อวันนี้**: สร้างโพสต์เช็คชื่อที่ห้องเช็คชื่อ พร้อมปุ่ม/รีแอคชัน\n"
+            "• **ส่งสรุปตอนนี้**: นับผลและสรุปทันที (ไม่ต้องรอ 19:00)\n"
+            "• **ส่งปุ่มลงทะเบียน**: เปิดฟอร์มลงทะเบียน (ชื่อเล่น/อายุ) — ลงได้ครั้งเดียว\n"
+            "• **ส่งปุ่ม Alarm (DM Role)**: ส่งปุ่มแจ้งเตือน DM หา Role เป้าหมาย"
+        ),
+        color=0xFFD700
+    )
+    embed.set_footer(text="MF_BOT • Control Panel")
+    await ctx.send(embed=embed, view=MainPanelView())
+
 @bot.command(name="ปุ่ม")
 async def cmd_buttons(ctx: commands.Context):
+    """ปุ่ม Alarm DM (เวอร์ชันเดี่ยว)"""
     if ctx.channel.id != BOT_CHANNEL_ID:
         await ctx.send("❌ ใช้คำสั่งนี้ได้เฉพาะในห้อง BOT เท่านั้น")
         return
-
     embed = discord.Embed(
-        title="🛠️ MF_BOT Panel",
-        description="ใช้ปุ่มด้านล่างเพื่อเรียกเตือนสมาชิกกลุ่มเป้าหมาย",
-        color=0xFFD700
+        title="🚨 Alarm Sender",
+        description="กดปุ่มด้านล่างเพื่อ DM แจ้งเตือนไปยัง Role เป้าหมาย",
+        color=0xF44336
     )
-    embed.set_thumbnail(url="https://i.ibb.co/3kZ0xFq/mf-logo.png")
-    embed.set_footer(text="MF_BOT • Control Panel")
     await ctx.send(embed=embed, view=RoleMessageView())
 
 @bot.command(name="เช็คชื่อ")
 async def cmd_checkin(ctx: commands.Context):
+    """โพสต์เช็คชื่อด้วยรีแอคชัน (ทางเลือก)"""
     if ctx.channel.id != CHECKRAID_CHANNEL_ID:
         await ctx.send("❌ คำสั่งนี้ใช้ได้เฉพาะในห้องเช็คชื่อที่กำหนดเท่านั้น!")
         return
-    today = datetime.datetime.now().strftime("%d/%m/%y")
+    today = datetime.datetime.now(TZ).strftime("%Y-%m-%d")
     role_mention = f"<@&{ROLE_ID}>"
     embed = discord.Embed(
         title="🌅 เช็คชื่อ Raid/Protect",
-        description=f"วันที่ {today} \n{role_mention} โปรดเช็คชื่อด้วยปุ่ม Reaction ด้านล่าง",
+        description=f"วันที่ **{today}** \n{role_mention} โปรดเช็คชื่อด้วยรีแอคชันด้านล่าง",
         color=0x00C853
     )
     msg = await ctx.send(embed=embed)
     await msg.add_reaction("✅")
     await msg.add_reaction("❌")
+
+    raid_state["current"] = {
+        "date": today,
+        "channel_id": ctx.channel.id,
+        "message_id": msg.id,
+        "summary_sent": False
+    }
+    save_raid_state(raid_state)
 
 @bot.command(name="ลงทะเบียน")
 async def cmd_register(ctx: commands.Context):
@@ -312,7 +541,6 @@ async def on_member_join(member: discord.Member):
         )
         if member.avatar:
             embed.set_thumbnail(url=member.avatar.url)
-        embed.set_image(url="https://i.ibb.co/3kZ0xFq/mf-logo.png")
         embed.set_footer(text="MF_BOT • ระบบต้อนรับ")
         await channel.send(embed=embed)
 
@@ -335,6 +563,16 @@ async def on_ready():
         update_status.start()
     except RuntimeError:
         pass
+    try:
+        raid_summary_scheduler.start()
+    except RuntimeError:
+        pass
+
+    # Persistent views (ให้ปุ่มใช้ได้หลังรีสตาร์ท)
+    bot.add_view(MainPanelView())
+    bot.add_view(RoleMessageView())
+    bot.add_view(RegisterView())
+    # หมายเหตุ: RaidCheckView ต้องสร้างใหม่พร้อม message_id ตอนโพสต์ จึงไม่ add_view ที่นี่
 
 @tasks.loop(seconds=STATUS_UPDATE_INTERVAL)
 async def update_status():
@@ -346,7 +584,7 @@ async def update_status():
 
 @bot.event
 async def on_disconnect():
-    print("Bot disconnected! (gateway) — Discord side", flush=True)
+    print("Bot disconnected! (gateway)", flush=True)
 
 # ---------------- Voice state (เสถียรขึ้น) ----------------
 @bot.event
@@ -363,7 +601,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     global voice_client
 
     try:
-        # sync ปัจจุบัน
         vc_now = discord.utils.get(bot.voice_clients, guild=member.guild)
         if vc_now is not None:
             voice_client = vc_now
@@ -410,14 +647,6 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 
         last_voice_states[member.id] = after
 
-    except AttributeError as e:
-        print(f"[ERROR] on_voice_state_update(AttributeError): {e}", flush=True)
-        try:
-            if voice_client and voice_client.is_connected():
-                await voice_client.disconnect(force=True)
-        except Exception:
-            pass
-        voice_client = None
     except Exception as e:
         print(f"[ERROR] on_voice_state_update: {e}", flush=True)
 
