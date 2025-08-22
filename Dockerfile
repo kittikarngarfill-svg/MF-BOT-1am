@@ -1,21 +1,17 @@
-﻿# ใช้ Python 3.12 (เสถียรกับ nextcord voice)
-FROM python:3.12-slim
+﻿FROM python:3.12-slim
 
-# ติดตั้ง ffmpeg + libopus สำหรับเสียง
-RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg libopus0 \
- && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
-# ติดตั้งไลบรารี Python
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
 
-# คัดลอกโค้ดที่เหลือ
+# ติดตั้ง dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt --root-user-action=ignore
+
+# คัดลอกซอร์สทั้งหมด
 COPY . .
 
-# ให้ log ไม่บัฟเฟอร์
-ENV PYTHONUNBUFFERED=1
-
-# รันบอท (คุณมี keep_alive แล้ว)
+# เริ่มโปรเซสเดียว ที่มีทั้งเว็บ keep-alive และ Discord bot
+# (keep_alive() จะถูกเรียกใน MF_BOT_1am.py)
 CMD ["python", "MF_BOT_1am.py"]

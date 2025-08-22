@@ -1,19 +1,18 @@
 # keep_alive.py
 import os
-from threading import Thread
 from flask import Flask
+from threading import Thread
 
 app = Flask(__name__)
 
 @app.get("/")
 def home():
-    return "MF_BOT is alive", 200
+    return "OK", 200
 
-def _run():
-    # Render ใส่ PORT มาให้ใน ENV; ใช้ค่านี้เสมอ
-    port = int(os.environ.get("PORT", "10000"))
+def run():
+    port = int(os.getenv("PORT", "8080"))  # สำคัญ: Render จะกำหนด $PORT มาให้
     app.run(host="0.0.0.0", port=port)
 
 def keep_alive():
-    t = Thread(target=_run, daemon=True)
+    t = Thread(target=run, daemon=True)
     t.start()
