@@ -1,7 +1,14 @@
 ﻿FROM python:3.12-slim
 
+# ติดตั้งระบบเสียง: ffmpeg + libopus
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg libopus0 && \
+    rm -rf /var/lib/apt/lists/*
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+
+
 
 WORKDIR /app
 
@@ -11,6 +18,7 @@ RUN pip install --no-cache-dir -r requirements.txt --root-user-action=ignore
 
 # คัดลอกซอร์สทั้งหมด
 COPY . .
+
 
 # เริ่มโปรเซสเดียว ที่มีทั้งเว็บ keep-alive และ Discord bot
 # (keep_alive() จะถูกเรียกใน MF_BOT_1am.py)

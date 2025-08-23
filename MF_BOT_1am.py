@@ -822,6 +822,10 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
     except Exception as e:
         print(f"[ERROR] on_voice_state_update: {e}", flush=True)
 
+if ENABLE_VOICE and (not FFMPEG_OK or not discord.opus.is_loaded()):
+    print("[VOICE] Dependencies not ready -> disabling voice features", flush=True)
+    ENABLE_VOICE = False
+    
 # ---------------- Main ----------------
 if __name__ == "__main__":
     if HAS_KEEP_ALIVE:
