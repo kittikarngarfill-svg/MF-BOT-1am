@@ -86,14 +86,51 @@ bot = commands.Bot(
     case_insensitive=True
 )
 
+# ---------------- Util: datetime / roles ----------------
+def fmt_tz(dt: datetime.datetime | None) -> str:
+    """format เป็น Y-m-d H:M ที่โซน TZ"""
+    if not dt:
+        return "ไม่พบข้อมูล"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=datetime.timezone.utc)
+    return dt.astimezone(TZ).strftime("%Y-%m-%d %H:%M")
+
+def parse_iso_utc(s: str | None) -> datetime.datetime | None:
+    if not s:
+        return None
+    try:
+        # รองรับ ...Z และ offset
+        s2 = s.replace("Z", "+00:00")
+        return datetime.datetime.fromisoformat(s2)
+    except Exception:
+        return None
+
+def roles_string(member: discord.Member, limit: int = 10) -> str:
+    roles = [r for r in member.roles if r.name != "@everyone"]
+    if not roles:
+        return "ไม่มีบทบาท"
+    names = [r.name for r in roles]
+    if len(names) <= limit:
+        return ", ".join(names)
+    shown = ", ".join(names[:limit])
+    return f"{shown} … (+{len(names)-limit})"
+
 # ---------------- Signal & on_error hooks ----------------
 def _graceful_shutdown(signum, frame):
     print(f"[SIGNAL] Received {signum} -> shutting down", flush=True)
     try:
-        loop = asyncio.get_event_loop()
-        loop.create_task(bot.close())
+        loop = getattr(bot, "loop", None)
+        if loop and loop.is_running():
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(bot.close()))
+        else:
+            raise RuntimeError("event loop not running")
     except Exception as e:
         print(f"[SIGNAL] close failed: {e}", flush=True)
+        try:
+            bot.close()
+        except Exception:
+            pass
+        raise SystemExit(0)
 
 for s in (signal.SIGINT, signal.SIGTERM):
     try:
@@ -274,7 +311,7 @@ class RegisterModal(discord.ui.Modal, title="ลงทะเบียนสม�
 
 
 def make_register_panel_embed() -> discord.Embed:
-    today = datetime.datetime.now(TZ).strftime("%-d/%-m/%Y %H:%M") if hasattr(datetime, "datetime") else ""
+    # ใช้รูปแบบข้อความให้เหมือนภาพตัวอย่าง
     desc = (
         "📝 **ลงทะเบียนสมาชิก 1AM SCUM TEAM** 📝\n\n"
         "คลิกปุ่ม **ลงทะเบียน** เพื่อกรอกชื่อเล่นและอายุ\n\n"
@@ -293,11 +330,29 @@ def make_register_panel_embed() -> discord.Embed:
     emb.set_footer(text="MF_BOT • ระบบลงทะเบียน")
     return emb
 
+def build_myinfo_embed(member: discord.Member, row: dict | None) -> discord.Embed:
+    """สร้าง embed ข้อมูลสมาชิก: ชื่อเล่น/อายุ/วันที่เข้าดิสคอร์ด/วันที่ลงทะเบียน/บทบาท"""
+    emb = discord.Embed(title="ข้อมูลลงทะเบียนของคุณ", color=0x3498db)
+    nickname = row.get("nickname") if row else None
+    age = row.get("age") if row else None
+    reg_dt = parse_iso_utc(row.get("updated_at")) if row else None
+
+    emb.add_field(name="ชื่อเล่น", value=nickname or "ยังไม่ลงทะเบียน")
+    emb.add_field(name="อายุ", value=(str(age) if age is not None else "-"))
+    emb.add_field(name="วันที่เข้าดิสคอร์ด", value=fmt_tz(member.joined_at), inline=False)
+    emb.add_field(name="วันที่ลงทะเบียน", value=fmt_tz(reg_dt), inline=False)
+    emb.add_field(name="บทบาทปัจจุบัน", value=roles_string(member), inline=False)
+    emb.set_thumbnail(url=member.display_avatar.url)
+    emb.set_footer(text="เวลาแสดงผลในเขตเวลา Asia/Bangkok")
+    return emb
+
 
 class RegisterView(discord.ui.View):
+    """แสดงสองปุ่ม: 📝 ลงทะเบียน และ 👤 My Info"""
     def __init__(self):
         super().__init__(timeout=None)  # persistent
-    @discord.ui.button(label="ลงทะเบียน", style=discord.ButtonStyle.success, custom_id="reg_open_modal")
+
+    @discord.ui.button(label="ลงทะเบียน", style=discord.ButtonStyle.success, emoji="📝", custom_id="reg_open_modal")
     async def register(self, interaction: discord.Interaction, button: discord.ui.Button):
         # ถ้าลงทะเบียนแล้ว -> ไม่ให้กดซ้ำ
         if interaction.user.id in registered_users and registered_users[interaction.user.id].get("nickname"):
@@ -306,7 +361,13 @@ class RegisterView(discord.ui.View):
                 ephemeral=True
             )
         await interaction.response.send_modal(RegisterModal())
-        
+
+    @discord.ui.button(label="My Info", style=discord.ButtonStyle.secondary, emoji="👤", custom_id="reg_myinfo_btn")
+    async def myinfo(self, interaction: discord.Interaction, button: discord.ui.Button):
+        row = registered_users.get(interaction.user.id)
+        emb = build_myinfo_embed(interaction.user, row)
+        await interaction.response.send_message(embed=emb, ephemeral=True)
+
 # ---------------- Raid Check state (JSON) ----------------
 RAID_STATE_FILE = "raid_state.json"
 def load_raid_state():
@@ -430,7 +491,6 @@ class MainPanelView(discord.ui.View):
     async def send_register(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.channel.send(embed=make_register_panel_embed(), view=RegisterView())
         await interaction.response.send_message("✅ ส่งปุ่มลงทะเบียนแล้ว", ephemeral=True)
-        
 
     @discord.ui.button(label=" Alarm (DM Role)", style=discord.ButtonStyle.danger, emoji="🚨", custom_id="panel_send_alarm")
     async def send_alarm(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -507,6 +567,42 @@ async def raid_summary_scheduler():
             except Exception as e:
                 print(f"[SCHED] summary error: {e}", flush=True)
 
+# ---------------- ตัวกู้โพสต์เช็คชื่อจากห้อง (เมื่อไฟล์หาย) ----------------
+async def restore_raidcheck_from_channel() -> bool:
+    """พยายามค้นหาโพสต์เช็คชื่อล่าสุดจากห้อง CHECKRAID แล้ว restore view"""
+    guild = bot.get_guild(GUILD_ID)
+    if not guild:
+        print("[RESTORE] Guild not found", flush=True)
+        return False
+
+    ch = guild.get_channel(CHECKRAID_CHANNEL_ID)
+    if not isinstance(ch, discord.TextChannel):
+        print("[RESTORE] CheckRaid channel not found", flush=True)
+        return False
+
+    try:
+        async for msg in ch.history(limit=100):  # ย้อนหลังล่าสุด ~100 ข้อความ
+            if msg.author.id != bot.user.id:
+                continue
+            if not msg.embeds:
+                continue
+            emb = msg.embeds[0]
+            title = (emb.title or "").strip()
+            if title.startswith("🌅 เช็คชื่อ") or title.startswith("⚔️ เช็คชื่อ"):
+                raid_state["current"] = {
+                    "date": datetime.datetime.now(TZ).strftime("%Y-%m-%d"),
+                    "channel_id": ch.id,
+                    "message_id": msg.id,
+                    "summary_sent": False
+                }
+                save_raid_state(raid_state)
+                bot.add_view(RaidCheckView(msg.id))
+                print(f"[RESTORE] Re-attached RaidCheckView to message_id={msg.id}", flush=True)
+                return True
+    except Exception as e:
+        print(f"[RESTORE] scan error: {e}", flush=True)
+    return False
+
 # ---------------- Commands ----------------
 @bot.command(name="panel")
 @commands.has_permissions(manage_guild=True)
@@ -570,14 +666,7 @@ async def cmd_register(ctx: commands.Context):
 @bot.command(name="myinfo")
 async def cmd_myinfo(ctx: commands.Context):
     row = registered_users.get(ctx.author.id)
-    if not row or not row.get("nickname"):
-        return await ctx.reply("ยังไม่มีข้อมูลลงทะเบียนของคุณ ลองกดปุ่ม **ลงทะเบียน** ก่อนนะครับ", mention_author=False)
-    emb = discord.Embed(title="ข้อมูลของคุณ", color=0x3498db)
-    emb.add_field(name="ชื่อเล่น", value=row["nickname"])
-    emb.add_field(name="อายุ", value=str(row["age"]))
-    if row.get("updated_at"):
-        emb.add_field(name="อัปเดตล่าสุด (UTC)", value=row["updated_at"].split("T")[0], inline=False)
-    emb.set_thumbnail(url=ctx.author.display_avatar.url)
+    emb = build_myinfo_embed(ctx.author, row)
     await ctx.reply(embed=emb, mention_author=False)
 
 @bot.command(name="unregister")
@@ -640,16 +729,22 @@ async def on_ready():
     bot.add_view(RoleMessageView())
     bot.add_view(RegisterView())
 
-    # คืนสภาพปุ่มของโพสต์เช็คชื่อเดิม (ถ้ามี)
+    # 1) พยายาม restore จากไฟล์ก่อน
+    restored = False
     try:
         cur = raid_state.get("current")
         if cur and isinstance(cur.get("message_id"), int):
             bot.add_view(RaidCheckView(cur["message_id"]))
             print(f"[RESTORE] RaidCheckView restored for message_id={cur['message_id']}", flush=True)
-        else:
-            print("[RESTORE] No raid_check message to restore", flush=True)
+            restored = True
     except Exception as e:
-        print(f"[RESTORE] Failed to restore RaidCheckView: {e}", flush=True)
+        print(f"[RESTORE] Failed to restore from file: {e}", flush=True)
+
+    # 2) ถ้าไฟล์หาย (เช่น Render ฟรี) → ลองค้นจากห้องย้อนหลัง
+    if not restored:
+        ok = await restore_raidcheck_from_channel()
+        if not ok:
+            print("[RESTORE] No raid_check message to restore", flush=True)
 
 @tasks.loop(seconds=STATUS_UPDATE_INTERVAL)
 async def update_status():
@@ -735,6 +830,8 @@ if __name__ == "__main__":
         print("[BOOT] starting bot.run()", flush=True)
         bot.run(TOKEN)
         print("[BOOT] bot.run() returned (client closed).", flush=True)
+    except KeyboardInterrupt:
+        print("[BOOT] KeyboardInterrupt -> exiting.", flush=True)
     except Exception as e:
         print("[FATAL] bot.run crashed:", e, flush=True)
         traceback.print_exc()
