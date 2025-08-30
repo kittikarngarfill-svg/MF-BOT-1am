@@ -825,18 +825,59 @@ async def on_voice_state_update(member: discord.Member, before: discord.VoiceSta
 if ENABLE_VOICE and (not FFMPEG_OK or not discord.opus.is_loaded()):
     print("[VOICE] Dependencies not ready -> disabling voice features", flush=True)
     ENABLE_VOICE = False
+
+
+@bot.event
+async def setup_hook():
+    # ผูก persistent views ล่วงหน้า (อยู่รอดหลังรีสตาร์ต)
+    bot.add_view(MainPanelView())
+    bot.add_view(RoleMessageView())
+    bot.add_view(RegisterView())
+
+    # พยายาม restore จากไฟล์ก่อน
+    try:
+        cur = raid_state.get("current")
+        if cur and isinstance(cur.get("message_id"), int):
+            bot.add_view(RaidCheckView(cur["message_id"]))
+            print(f"[RESTORE] RaidCheckView restored for message_id={cur['message_id']}", flush=True)
+    except Exception as e:
+        print(f"[RESTORE] Failed to restore from file: {e}", flush=True)
     
 # ---------------- Main ----------------
+async def run_bot_forever():
+    # ถ้าอยากให้ปิดจริง ๆ (เช่นสั่ง deploy) ตั้ง ENV EXIT_ON_CLOSE=1
+    exit_on_close = os.getenv("EXIT_ON_CLOSE", "0") == "1"
+    backoff = 5  # วินาที ก่อนวนรันใหม่
+    while True:
+        try:
+            print("[BOOT] starting bot.start()", flush=True)
+            # reconnect=True เป็นดีฟอลต์ แต่ระบุไว้ชัดเจน
+            await bot.start(TOKEN, reconnect=True)
+        except discord.LoginFailure as e:
+            print(f"[FATAL] Login failed: {e}", flush=True)
+            break  # token ผิด แก้ env ก่อน
+        except KeyboardInterrupt:
+            print("[BOOT] KeyboardInterrupt -> exiting.", flush=True)
+            break
+        except Exception as e:
+            # crash ภายใน — รอแล้วลองใหม่
+            print(f"[WARN] bot.start() crashed: {e}", flush=True)
+            traceback.print_exc()
+            await asyncio.sleep(backoff)
+        else:
+            # ออกตามปกติ (client closed)
+            print("[BOOT] bot.start() returned (client closed).", flush=True)
+            if exit_on_close:
+                break
+            print(f"[RESTART] relaunching in {backoff}s ...", flush=True)
+            await asyncio.sleep(backoff)
+
 if __name__ == "__main__":
+    # (ถ้ามี) เปิด keep_alive ก่อน เพื่อให้โฮสต์ตรวจสุขภาพผ่าน
     if HAS_KEEP_ALIVE:
         keep_alive()
     try:
-        print("[BOOT] starting bot.run()", flush=True)
-        bot.run(TOKEN)
-        print("[BOOT] bot.run() returned (client closed).", flush=True)
-    except KeyboardInterrupt:
-        print("[BOOT] KeyboardInterrupt -> exiting.", flush=True)
+        asyncio.run(run_bot_forever())
     except Exception as e:
-        print("[FATAL] bot.run crashed:", e, flush=True)
-        traceback.print_exc()
+        print("[FATAL] asyncio.run failed:", e, flush=True)
         sys.exit(1)
